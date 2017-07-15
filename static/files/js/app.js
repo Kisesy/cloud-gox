@@ -9,7 +9,7 @@ app.controller("AppController", function($scope, $http) {
   // if (navigator.appVersion.indexOf("Linux")!=-1) OSName="Linux";
   window.cloudgox = $scope;
   $scope.package = {
-    name: "github.com/jpillora/serve",
+    name: "github.com/Kisesy/gscan_quic",
     version: "",
     versionVar: "main.VERSION",
     commitVar: "main.COMMIT",
