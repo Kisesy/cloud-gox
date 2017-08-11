@@ -3,9 +3,11 @@ package handler
 import (
 	"bytes"
 	"compress/gzip"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"net/http"
 	"os"
 	"os/exec"
 	"path"
@@ -17,6 +19,165 @@ import (
 
 	"github.com/jpillora/cloud-gox/release"
 )
+
+type tagCompare struct {
+	Commits []struct {
+		Sha    string `json:"sha"`
+		Commit struct {
+			Author struct {
+				Name  string    `json:"name"`
+				Email string    `json:"email"`
+				Date  time.Time `json:"date"`
+			} `json:"author"`
+			Committer struct {
+				Name  string    `json:"name"`
+				Email string    `json:"email"`
+				Date  time.Time `json:"date"`
+			} `json:"committer"`
+			Message string `json:"message"`
+			Tree    struct {
+				Sha string `json:"sha"`
+				URL string `json:"url"`
+			} `json:"tree"`
+			URL          string `json:"url"`
+			CommentCount int    `json:"comment_count"`
+		} `json:"commit"`
+		URL         string `json:"url"`
+		HTMLURL     string `json:"html_url"`
+		CommentsURL string `json:"comments_url"`
+		/*
+			Author      struct {
+				Login             string `json:"login"`
+				ID                int    `json:"id"`
+				AvatarURL         string `json:"avatar_url"`
+				GravatarID        string `json:"gravatar_id"`
+				URL               string `json:"url"`
+				HTMLURL           string `json:"html_url"`
+				FollowersURL      string `json:"followers_url"`
+				FollowingURL      string `json:"following_url"`
+				GistsURL          string `json:"gists_url"`
+				StarredURL        string `json:"starred_url"`
+				SubscriptionsURL  string `json:"subscriptions_url"`
+				OrganizationsURL  string `json:"organizations_url"`
+				ReposURL          string `json:"repos_url"`
+				EventsURL         string `json:"events_url"`
+				ReceivedEventsURL string `json:"received_events_url"`
+				Type              string `json:"type"`
+				SiteAdmin         bool   `json:"site_admin"`
+			} `json:"author"`
+			Committer struct {
+				Login             string `json:"login"`
+				ID                int    `json:"id"`
+				AvatarURL         string `json:"avatar_url"`
+				GravatarID        string `json:"gravatar_id"`
+				URL               string `json:"url"`
+				HTMLURL           string `json:"html_url"`
+				FollowersURL      string `json:"followers_url"`
+				FollowingURL      string `json:"following_url"`
+				GistsURL          string `json:"gists_url"`
+				StarredURL        string `json:"starred_url"`
+				SubscriptionsURL  string `json:"subscriptions_url"`
+				OrganizationsURL  string `json:"organizations_url"`
+				ReposURL          string `json:"repos_url"`
+				EventsURL         string `json:"events_url"`
+				ReceivedEventsURL string `json:"received_events_url"`
+				Type              string `json:"type"`
+				SiteAdmin         bool   `json:"site_admin"`
+			} `json:"committer"`
+			Parents []struct {
+				Sha     string `json:"sha"`
+				URL     string `json:"url"`
+				HTMLURL string `json:"html_url"`
+			} `json:"parents"`
+		*/
+	} `json:"commits"`
+}
+type latestRelease struct {
+	TagName         string `json:"tag_name"`
+	TargetCommitish string `json:"target_commitish"`
+}
+
+var (
+	GH_TOKEN string
+)
+
+func init() {
+	GH_TOKEN = os.Getenv("GH_TOKEN")
+}
+
+func httpGet(url string) (data []byte, err error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("Authorization", "token "+GH_TOKEN)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	data, err = ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return
+	}
+	return
+}
+
+func gen_desc(Package string) (desc string, err error) {
+	ps := strings.Split(Package, "/")
+	user, repo := ps[1], ps[2]
+
+	// "https://api.github.com/repos/:owner/:repo/releases/latest"
+	apiurl := "https://api.github.com/repos/%s/%s/releases/latest"
+	apiurl = fmt.Sprintf(apiurl, user, repo)
+
+	var lr latestRelease
+	data, err := httpGet(apiurl)
+	if err != nil {
+		panic(err)
+	}
+	err = json.Unmarshal(data, &lr)
+	if err != nil {
+		return
+	}
+
+	// lr.TagName = "1.2"
+
+	// "GET /repos/:owner/:repo/compare/:base...:head"
+	apiurl = "https://api.github.com/repos/%s/%s/compare/%s...%s"
+	apiurl = fmt.Sprintf(apiurl, user, repo, lr.TagName, lr.TargetCommitish)
+	data, err = httpGet(apiurl)
+	if err != nil {
+		return
+	}
+	var tc tagCompare
+	err = json.Unmarshal(data, &tc)
+	if err != nil {
+		return
+	}
+
+	b := new(bytes.Buffer)
+	b.WriteString("***ChangeLog:***\n")
+	b.WriteString("---------\n")
+	if len(tc.Commits) > 0 {
+		for _, x := range tc.Commits {
+			/*
+				commit := x["commit"]
+				committer := x["committer"]
+				user_name = commit['author']['name']
+				user_link = committer['html_url']
+			*/
+			commit_url := x.HTMLURL
+			commit_hash := x.Sha[:7]
+			message := x.Commit.Message
+			// msg = '[{user_name}]({user_link}): [`{commit_sha1}`]({commit_url}) {message}'.format(**locals())
+			b.WriteString(fmt.Sprintf("[`%s`](%s) %s\n", commit_hash, commit_url, message))
+		}
+	} else {
+		return
+	}
+	return b.String(), nil
+}
 
 //temporary storeage for the resulting binaries
 var tempBuild = path.Join(os.TempDir(), "cloudgox")
@@ -30,10 +191,11 @@ func (s *goxHandler) compile(c *Compilation) error {
 	var rel release.Release
 	once := sync.Once{}
 	setupRelease := func() {
-		desc := "*This release was automatically cross-compiled and uploaded by " +
-			"[cloud-gox](https://github.com/jpillora/cloud-gox) at " +
-			time.Now().UTC().Format(time.RFC3339) + "* using Go " +
-			"*" + s.config.BinVersion + "*"
+		desc, err := gen_desc(c.Package)
+		if err != nil {
+			s.Printf("Warning: %s\n", err)
+		}
+
 		if r, err := releaser.Setup(c.Package, c.Version, desc); err == nil {
 			rel = r
 			s.Printf("%s successfully setup release %s (%s)\n", c.Releaser, c.Package, c.Version)
